@@ -128,7 +128,7 @@ class DeleteConfirmationScreen extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(4),
       child: FutureBuilder<File?>(
-        future: photo.entity?.file,
+        future: _getFile(photo),
         builder: (context, snapshot) {
           if (snapshot.hasData && snapshot.data != null) {
             return Image.file(snapshot.data!, fit: BoxFit.cover);
@@ -140,5 +140,16 @@ class DeleteConfirmationScreen extends StatelessWidget {
         },
       ),
     );
+  }
+
+  Future<File?> _getFile(PhotoRecord photo) async {
+    try {
+      if (photo.entity != null) {
+        return await photo.entity!.file;
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
   }
 }

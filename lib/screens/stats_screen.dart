@@ -1,17 +1,25 @@
 import 'package:flutter/material.dart';
 import '../services/stats_service.dart';
+import '../services/favorites_service.dart';
+import '../services/storage_service.dart';
 import 'trash_screen.dart';
 
 class StatsScreen extends StatefulWidget {
   const StatsScreen({super.key});
 
   @override
-  State<StatsScreen> createState() => _StatsScreenState();
+  State<StatsScreen> createState() => StatsScreenState();
 }
 
-class _StatsScreenState extends State<StatsScreen> {
+class StatsScreenState extends State<StatsScreen> {
   final StatsService _statsService = StatsService();
+  final FavoritesService _favoritesService = FavoritesService();
   bool _loading = true;
+  bool _refreshing = false;
+  int _favoritesCount = 0;
+  int _totalSpace = 0;
+  int _freeSpace = 0;
+  int _usedSpace = 0;
 
   @override
   void initState() {
@@ -19,9 +27,52 @@ class _StatsScreenState extends State<StatsScreen> {
     _initStats();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 每次页面可见时刷新数据，但避免重复刷新
+    if (!_refreshing && !_loading) {
+      _refreshStats();
+    }
+  }
+
+  /// 公共刷新方法，供 MainScreen 调用
+  void refresh() {
+    if (!_refreshing && !_loading) {
+      _refreshStats();
+    }
+  }
+
   Future<void> _initStats() async {
     await _statsService.init();
-    setState(() => _loading = false);
+    await _favoritesService.init();
+    await _refreshStats();
+    if (mounted) {
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _refreshStats() async {
+    if (_refreshing) return;
+    _refreshing = true;
+
+    try {
+      // 获取实际收藏数量（过滤无效ID）
+      final favorites = await _favoritesService.getFavorites();
+      _favoritesCount = favorites.length;
+
+      // 获取存储空间信息
+      final storageInfo = await StorageService.getStorageInfo();
+      _totalSpace = storageInfo['total'] ?? 0;
+      _freeSpace = storageInfo['free'] ?? 0;
+      _usedSpace = storageInfo['used'] ?? 0;
+
+      if (mounted) {
+        setState(() {});
+      }
+    } finally {
+      _refreshing = false;
+    }
   }
 
   @override
@@ -83,7 +134,7 @@ class _StatsScreenState extends State<StatsScreen> {
         ),
         _buildMetricCard(
           '已收藏',
-          '${_statsService.favoritedCount}',
+          '$_favoritesCount',
           const Color(0xFF639922),
           Icons.favorite_outline,
         ),
@@ -108,6 +159,7 @@ class _StatsScreenState extends State<StatsScreen> {
       ],
     );
   }
+
 
   Widget _buildMetricCard(String label, String value, Color color, IconData icon, {VoidCallback? onTap}) {
     return GestureDetector(
@@ -138,12 +190,16 @@ class _StatsScreenState extends State<StatsScreen> {
               ],
             ),
             const SizedBox(height: 8),
-            Text(
-              value,
-              style: TextStyle(
-                color: color,
-                fontSize: 32,
-                fontWeight: FontWeight.w700,
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                value,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ],
@@ -154,7 +210,7 @@ class _StatsScreenState extends State<StatsScreen> {
 
   Widget _buildProgressBar() {
     final total = _statsService.viewedCount;
-    final processed = _statsService.favoritedCount + _statsService.deletedCount;
+    final processed = _favoritesCount + _statsService.deletedCount;
     final progress = total > 0 ? processed / total : 0.0;
 
     return Container(
@@ -318,7 +374,7 @@ class _StatsScreenState extends State<StatsScreen> {
   Widget _buildDailyChart() {
     final data = _statsService.getWeeklyData();
     final maxCount = data.isEmpty ? 1 : data.reduce((a, b) => a > b ? a : b);
-    final days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    final dayLabels = ['一', '二', '三', '四', '五', '六', '日'];
     final now = DateTime.now();
     final currentWeekday = now.weekday;
 
@@ -341,9 +397,13 @@ class _StatsScreenState extends State<StatsScreen> {
           ),
           const SizedBox(height: 16),
           ...List.generate(7, (index) {
-            final dayIndex = (index + 1);
-            final isToday = dayIndex == currentWeekday;
+            // data[0] 是 6 天前，data[6] 是今天
+            final daysAgo = 6 - index;
+            final date = now.subtract(Duration(days: daysAgo));
+            final weekday = date.weekday; // 1=周一, 7=周日
+            final isToday = daysAgo == 0;
             final count = data[index];
+            final dayLabel = '周${dayLabels[weekday - 1]}';
 
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),
@@ -352,7 +412,7 @@ class _StatsScreenState extends State<StatsScreen> {
                   SizedBox(
                     width: 28,
                     child: Text(
-                      days[index],
+                      dayLabel,
                       style: TextStyle(
                         color: isToday ? const Color(0xFF7F77DD) : Colors.grey[600],
                         fontSize: 12,
@@ -402,8 +462,8 @@ class _StatsScreenState extends State<StatsScreen> {
     final total = _statsService.viewedCount;
     if (total == 0) return const SizedBox();
 
-    final kept = total - _statsService.favoritedCount - _statsService.deletedCount;
-    final favorited = _statsService.favoritedCount;
+    final kept = total - _favoritesCount - _statsService.deletedCount;
+    final favorited = _favoritesCount;
     final deleted = _statsService.deletedCount;
 
     return Container(
@@ -472,6 +532,10 @@ class _StatsScreenState extends State<StatsScreen> {
   }
 
   Widget _buildStorageSection() {
+    final totalSpaceStr = StorageService.formatBytes(_totalSpace);
+    final freeSpaceStr = StorageService.formatBytes(_freeSpace);
+    final usedSpaceStr = StorageService.formatBytes(_usedSpace);
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -494,7 +558,7 @@ class _StatsScreenState extends State<StatsScreen> {
             children: [
               Expanded(
                 child: _buildStorageItem(
-                  '本月释放',
+                  '已释放空间',
                   _statsService.formattedFreedSpace,
                   Colors.orange,
                 ),
@@ -506,9 +570,33 @@ class _StatsScreenState extends State<StatsScreen> {
               ),
               Expanded(
                 child: _buildStorageItem(
-                  '累计释放',
-                  _statsService.formattedFreedSpace,
+                  '总空间',
+                  totalSpaceStr,
                   const Color(0xFF7F77DD),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _buildStorageItem(
+                  '已用空间',
+                  usedSpaceStr,
+                  Colors.red,
+                ),
+              ),
+              Container(
+                width: 1,
+                height: 40,
+                color: Colors.grey[800],
+              ),
+              Expanded(
+                child: _buildStorageItem(
+                  '可用空间',
+                  freeSpaceStr,
+                  Colors.green,
                 ),
               ),
             ],
@@ -523,15 +611,18 @@ class _StatsScreenState extends State<StatsScreen> {
       children: [
         Text(
           label,
-          style: TextStyle(color: Colors.grey[500], fontSize: 12),
+          style: TextStyle(color: Colors.grey[500], fontSize: 11),
         ),
         const SizedBox(height: 4),
-        Text(
-          value,
-          style: TextStyle(
-            color: color,
-            fontSize: 20,
-            fontWeight: FontWeight.w700,
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ),
       ],

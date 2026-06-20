@@ -33,6 +33,8 @@ class PhotoRecord {
   final int fileSize;
   final int width;
   final int height;
+  final bool isVideo;
+  final int duration; // 视频时长（秒）
   final AssetEntity? entity;
 
   PhotoRecord({
@@ -46,6 +48,8 @@ class PhotoRecord {
     this.fileSize = 0,
     this.width = 0,
     this.height = 0,
+    this.isVideo = false,
+    this.duration = 0,
     this.entity,
   });
 
@@ -57,6 +61,7 @@ class PhotoRecord {
 
   /// 格式化文件大小
   String get formattedSize {
+    if (fileSize <= 0) return '未知大小';
     if (fileSize < 1024) return '$fileSize B';
     if (fileSize < 1024 * 1024) return '${(fileSize / 1024).toStringAsFixed(1)} KB';
     if (fileSize < 1024 * 1024 * 1024) return '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';

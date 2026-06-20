@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
 import '../services/stats_service.dart';
+import '../services/photo_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -12,6 +13,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final StatsService _statsService = StatsService();
+  final PhotoService _photoService = PhotoService();
 
   // 设置项状态
   bool _notificationsEnabled = true;
@@ -133,7 +135,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
 
           _buildSection(
-            '废纸篓',
+            '暂删区',
             [
               _buildSelectionItem(
                 icon: Icons.delete_sweep_outlined,
@@ -147,7 +149,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               _buildActionItem(
                 icon: Icons.delete_forever_outlined,
-                title: '清空废纸篓',
+                title: '清空暂删区',
                 subtitle: '永久删除所有待删除照片',
                 onTap: _showClearTrashDialog,
                 isDestructive: true,
@@ -181,10 +183,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onTap: _showResetStatsDialog,
               ),
               _buildActionItem(
-                icon: Icons.download_outlined,
-                title: '导出收藏列表',
-                subtitle: '导出收藏照片列表为文本文件',
-                onTap: _exportFavorites,
+                icon: Icons.videocam_outlined,
+                title: '测试视频加载',
+                subtitle: '加载一个视频测试显示效果',
+                onTap: _testVideoLoad,
               ),
             ],
           ),
@@ -195,27 +197,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _buildInfoItem(
                 icon: Icons.info_outline,
                 title: '版本',
-                value: 'v1.0.0',
+                value: 'v1.1.0',
               ),
               _buildInfoItem(
                 icon: Icons.update,
                 title: '构建号',
-                value: '2026.06.07',
+                value: '2026.06.20',
               ),
               _buildActionItem(
                 icon: Icons.privacy_tip_outlined,
                 title: '隐私政策',
-                onTap: () {},
-              ),
-              _buildActionItem(
-                icon: Icons.description_outlined,
-                title: '用户协议',
-                onTap: () {},
-              ),
-              _buildActionItem(
-                icon: Icons.code,
-                title: '开源许可',
-                onTap: () {},
+                onTap: _showPrivacyPolicy,
               ),
             ],
           ),
@@ -503,7 +495,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1C1C1E),
-        title: const Text('清空废纸篓', style: TextStyle(color: Colors.white)),
+        title: const Text('清空暂删区', style: TextStyle(color: Colors.white)),
         content: const Text(
           '确定要永久删除所有待删除照片吗？此操作不可撤销。',
           style: TextStyle(color: Colors.grey),
@@ -516,9 +508,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              // TODO: 执行清空废纸篓
+              // TODO: 执行清空暂删区
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('废纸篓已清空')),
+                const SnackBar(content: Text('暂删区已清空')),
               );
             },
             child: const Text('确认删除', style: TextStyle(color: Color(0xFFE24B4A))),
@@ -561,10 +553,138 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _exportFavorites() {
-    // TODO: 实现导出收藏列表
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('功能开发中...')),
+  void _testVideoLoad() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        backgroundColor: Color(0xFF1C1C1E),
+        content: Row(
+          children: [
+            CircularProgressIndicator(color: Color(0xFF7F77DD)),
+            SizedBox(width: 16),
+            Text('正在加载视频...', style: TextStyle(color: Colors.white)),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final photos = await _photoService.loadPhotos();
+      Navigator.pop(context); // Close loading dialog
+
+      final videos = photos.where((p) => p.isVideo).toList();
+      final images = photos.where((p) => !p.isVideo).toList();
+
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1C1C1E),
+          title: const Text('视频加载测试', style: TextStyle(color: Colors.white)),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '加载结果：',
+                  style: TextStyle(color: Colors.grey[400], fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '• 总数: ${photos.length}',
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
+                Text(
+                  '• 图片: ${images.length}',
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
+                Text(
+                  '• 视频: ${videos.length}',
+                  style: TextStyle(
+                    color: videos.isNotEmpty ? const Color(0xFF639922) : const Color(0xFFE24B4A),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (videos.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  const Text(
+                    '视频列表：',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  ...videos.take(5).map((v) => Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      '• ${v.filename ?? "未命名"} (${_formatDuration(v.duration)})',
+                      style: TextStyle(color: Colors.grey[400], fontSize: 13),
+                    ),
+                  )),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      Navigator.pop(context); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('加载失败: $e')),
+      );
+    }
+  }
+
+  String _formatDuration(int seconds) {
+    final minutes = seconds ~/ 60;
+    final remainingSeconds = seconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
+  }
+
+  void _showPrivacyPolicy() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text('隐私政策', style: TextStyle(color: Colors.white)),
+        content: const SingleChildScrollView(
+          child: Text(
+            'PhotoFlow 隐私政策\n\n'
+            '最后更新：2026年6月20日\n\n'
+            '1. 数据收集\n'
+            'PhotoFlow 不收集任何个人信息。所有照片数据仅在您的设备本地处理和存储。\n\n'
+            '2. 网络访问\n'
+            'PhotoFlow 不需要网络连接即可正常使用。您的照片数据不会上传到任何服务器。\n\n'
+            '3. 本地存储\n'
+            '应用使用以下本地存储：\n'
+            '• 照片访问：用于浏览和管理您的相册\n'
+            '• 应用存储：用于保存暂删区备份和缩略图\n'
+            '• 统计数据：用于记录整理进度（仅存储在设备本地）\n\n'
+            '4. 数据安全\n'
+            '• 所有数据仅存储在您的设备上\n'
+            '• 暂删区备份使用应用私有目录\n'
+            '• 删除照片前会创建本地备份，支持恢复\n\n'
+            '5. 权限使用\n'
+            '• 相册访问权限：用于浏览和管理照片\n'
+            '• 存储权限：用于备份和恢复照片\n\n'
+            '6. 联系我们\n'
+            '如有任何隐私相关问题，请通过应用内反馈联系我们。',
+            style: TextStyle(color: Colors.grey, fontSize: 14),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
     );
   }
 }

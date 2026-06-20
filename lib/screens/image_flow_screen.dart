@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/photo_record.dart';
 import '../services/photo_service.dart';
 import '../services/stats_service.dart';
@@ -31,10 +32,18 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
   int _page = 0;
   String? _error;
 
+  // 批次确认相关
+  int _viewedCount = 0;
+  static const int _batchSize = 50;
+  bool _batchConfirmVisible = false;
+
   // 动画相关
   late AnimationController _slideController;
+  late AnimationController _verticalSlideController;
   double _dragOffset = 0;
+  double _verticalDragOffset = 0;
   bool _isDragging = false;
+  bool _isVerticalDragging = false;
 
   // 文件缓存
   final Map<String, File?> _fileCache = {};
@@ -52,12 +61,17 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
+    _verticalSlideController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
     _loadPhotos();
   }
 
   @override
   void dispose() {
     _slideController.dispose();
+    _verticalSlideController.dispose();
     super.dispose();
   }
 
@@ -129,6 +143,8 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
       _currentIndex++;
     });
     _statsService.incrementViewed();
+    _viewedCount++;
+    _checkBatchConfirmation();
     _showAutoToast('已标记删除', isDelete: true);
     _checkPreload();
   }
@@ -145,6 +161,8 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
     _favoritesService.addFavorite(photo);
     _statsService.incrementFavorited();
     _statsService.incrementViewed();
+    _viewedCount++;
+    _checkBatchConfirmation();
     _showAutoToast('已收藏', isDelete: false);
     _checkPreload();
   }
@@ -155,9 +173,59 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
       setState(() {
         _currentIndex++;
         _statsService.incrementViewed();
+        _viewedCount++;
       });
+      _checkBatchConfirmation();
       _checkPreload();
     }
+  }
+
+  // 检查是否需要批次确认
+  void _checkBatchConfirmation() {
+    if (_viewedCount >= _batchSize && !_batchConfirmVisible) {
+      _batchConfirmVisible = true;
+      _showBatchConfirmDialog();
+    }
+  }
+
+  // 显示批次确认对话框
+  void _showBatchConfirmDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text('批次确认', style: TextStyle(color: Colors.white)),
+        content: Text(
+          '你已浏览 $_viewedCount 张照片。\n'
+          '待删除: ${_pendingDelete.length} 张\n'
+          '是否继续下一批？',
+          style: const TextStyle(color: Colors.grey),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              _batchConfirmVisible = false;
+              _viewedCount = 0;
+              // 处理待删除照片
+              if (_pendingDelete.isNotEmpty) {
+                await _deleteAllPending();
+              }
+            },
+            child: const Text('删除并继续'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _batchConfirmVisible = false;
+              _viewedCount = 0;
+            },
+            child: const Text('继续浏览'),
+          ),
+        ],
+      ),
+    );
   }
 
   // 向右滑 - 上一张
@@ -223,24 +291,118 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
   Future<void> _deleteAllPending() async {
     if (_pendingDelete.isEmpty) return;
 
-    final ids = _pendingDelete
-        .where((p) => p.entity != null)
-        .map((p) => p.entity!.id)
-        .toList();
+    // 容量检查
+    if (!await _trashService.canBackupBatch(_pendingDelete)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('可用空间不足，无法备份照片'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
 
-    if (ids.isNotEmpty) {
-      await PhotoManager.editor.deleteWithIds(ids);
-      for (final photo in _pendingDelete) {
-        // 添加到废纸篓记录
-        await _trashService.addToTrash(photo);
-        _statsService.addFreedSpace(photo.fileSize);
-        _statsService.incrementDeleted();
+    // 准备阶段：备份原图 + 写入 prepared 记录
+    final List<PhotoRecord> prepared = [];
+    final List<PhotoRecord> prepareFailed = [];
+
+    for (final photo in _pendingDelete) {
+      try {
+        final tempPath = await _trashService.prepareBackup(photo);
+        if (tempPath != null) {
+          final thumbPath = await _trashService.generateThumbnail(photo);
+          await _trashService.writePreparedRecord(
+            photo,
+            tempBackupPath: tempPath,
+            thumbnailPath: thumbPath,
+          );
+          prepared.add(photo);
+        } else {
+          prepareFailed.add(photo);
+        }
+      } catch (e) {
+        debugPrint('准备备份失败: $e');
+        prepareFailed.add(photo);
       }
     }
 
+    // 系统删除阶段
+    final List<PhotoRecord> committed = [];
+    final List<PhotoRecord> deleteFailed = [];
+
+    if (prepared.isNotEmpty) {
+      final ids = prepared
+          .where((p) => p.entity != null)
+          .map((p) => p.entity!.id)
+          .toList();
+
+      if (ids.isNotEmpty) {
+        try {
+          final deletedIds = await PhotoManager.editor.deleteWithIds(ids);
+          final deletedIdSet = Set<String>.from(deletedIds);
+
+          for (final photo in prepared) {
+            if (deletedIdSet.contains(photo.id)) {
+              // 系统删除成功，提交记录
+              final success = await _trashService.commitTrashRecord(photo.id);
+              if (success) {
+                committed.add(photo);
+                _statsService.incrementDeleted();
+              } else {
+                // 提交失败，但原图已删除，记录仍在 prepared 状态
+                // 启动扫描会处理这种情况
+                committed.add(photo);
+                _statsService.incrementDeleted();
+              }
+            } else {
+              // 系统删除失败，回滚备份
+              await _trashService.rollbackBackup(photo.id);
+              deleteFailed.add(photo);
+            }
+          }
+        } catch (e) {
+          // 异常时，保持 prepared 状态，不增加统计，不从待删除列表移除
+          debugPrint('系统删除异常（保持 prepared 状态）: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('删除结果待确认，请稍后重试'),
+                duration: Duration(seconds: 3),
+              ),
+            );
+          }
+          // 不要 return，继续执行后续逻辑
+        }
+      }
+    }
+
+    // 更新待删除列表：只移除成功的项
     setState(() {
-      _pendingDelete.clear();
+      for (final photo in committed) {
+        _pendingDelete.remove(photo);
+      }
     });
+
+    // 提示结果
+    if (mounted) {
+      final messages = <String>[];
+      if (prepareFailed.isNotEmpty) {
+        messages.add('${prepareFailed.length} 张备份失败');
+      }
+      if (deleteFailed.isNotEmpty) {
+        messages.add('${deleteFailed.length} 张删除失败');
+      }
+      if (messages.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(messages.join('，')),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
   }
 
   // 公开属性：是否有待删除照片
@@ -250,27 +412,39 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
   Future<bool> showDeleteConfirmation() async {
     if (_pendingDelete.isEmpty) return true;
 
-    final confirmed = await Navigator.push<bool>(
-      context,
-      PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            DeleteConfirmationScreen(photos: _pendingDelete),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final tween = Tween(begin: const Offset(1.0, 0.0), end: Offset.zero)
-              .chain(CurveTween(curve: Curves.easeOutCubic));
-          return SlideTransition(
-            position: animation.drive(tween),
-            child: child,
-          );
-        },
-        transitionDuration: const Duration(milliseconds: 300),
-      ),
-    );
+    try {
+      final confirmed = await Navigator.push<bool>(
+        context,
+        PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) =>
+              DeleteConfirmationScreen(photos: _pendingDelete),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            final tween = Tween(begin: const Offset(1.0, 0.0), end: Offset.zero)
+                .chain(CurveTween(curve: Curves.easeOutCubic));
+            return SlideTransition(
+              position: animation.drive(tween),
+              child: child,
+            );
+          },
+          transitionDuration: const Duration(milliseconds: 300),
+        ),
+      );
 
-    if (confirmed == true) {
-      await _deleteAllPending();
-      return true;
-    } else {
+      if (confirmed == true) {
+        await _deleteAllPending();
+        return true;
+      } else {
+        setState(() {
+          for (final photo in _pendingDelete) {
+            photo.status = PhotoStatus.pending;
+          }
+          _pendingDelete.clear();
+        });
+        return false;
+      }
+    } catch (e) {
+      debugPrint('删除确认流程异常: $e');
+      // 异常时重置状态
       setState(() {
         for (final photo in _pendingDelete) {
           photo.status = PhotoStatus.pending;
@@ -281,12 +455,16 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
     }
   }
 
-  Future<bool> _onWillPop() async {
+  Future<void> _onPopInvokedWithResult(bool didPop, dynamic result) async {
+    if (didPop) return;
     if (_pendingDelete.isNotEmpty) {
-      final result = await showDeleteConfirmation();
-      return result;
+      final confirmed = await showDeleteConfirmation();
+      if (confirmed && mounted) {
+        Navigator.of(context).pop();
+      }
+    } else {
+      Navigator.of(context).pop();
     }
-    return true;
   }
 
   // 处理水平拖拽
@@ -350,11 +528,14 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
     });
 
     _slideController.forward().then((_) {
+      if (!mounted) return;
       setState(() {
         _currentIndex++;
         _dragOffset = 0;
         _statsService.incrementViewed();
+        _viewedCount++;
       });
+      _checkBatchConfirmation();
       _checkPreload();
     });
   }
@@ -415,10 +596,7 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: _onWillPop,
-      child: _buildContent(),
-    );
+    return _buildContent();
   }
 
   Widget _buildContent() {
@@ -501,16 +679,21 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
       color: Colors.black,
       child: Stack(
         children: [
-          // 可缩放的图片
-          Center(
+          // 可缩放的图片 - 全屏显示
+          Positioned.fill(
             child: file != null
                 ? InteractiveViewer(
                     minScale: 1.0,
                     maxScale: 5.0,
-                    child: Image.file(
-                      file,
-                      fit: BoxFit.contain,
-                      cacheWidth: 1920,
+                    boundaryMargin: const EdgeInsets.all(double.infinity),
+                    child: SizedBox(
+                      width: MediaQuery.of(context).size.width,
+                      height: MediaQuery.of(context).size.height,
+                      child: Image.file(
+                        file,
+                        fit: BoxFit.contain,
+                        cacheWidth: 1920,
+                      ),
                     ),
                   )
                 : const Center(
@@ -562,9 +745,6 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
   }
 
   // 垂直手势处理（上下滑动）
-  double _verticalDragOffset = 0;
-  bool _isVerticalDragging = false;
-
   void _onVerticalDragStart(DragStartDetails details) {
     _isVerticalDragging = true;
     _verticalDragOffset = 0;
@@ -586,15 +766,56 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
 
     // 上滑删除
     if (_verticalDragOffset < -screenHeight * 0.15 || velocity < -500) {
-      _onSwipeUp();
+      _animateVerticalSwipe(isUp: true);
     }
     // 下滑收藏
     else if (_verticalDragOffset > screenHeight * 0.15 || velocity > 500) {
-      _onSwipeDown();
+      _animateVerticalSwipe(isUp: false);
+    } else {
+      // 回弹动画
+      _verticalSlideController.reverse();
+      setState(() {
+        _verticalDragOffset = 0;
+      });
+    }
+  }
+
+  // 垂直滑动动画
+  void _animateVerticalSwipe({required bool isUp}) {
+    final screenHeight = MediaQuery.of(context).size.height;
+    final startOffset = _verticalDragOffset;
+    final endOffset = isUp ? -screenHeight : screenHeight;
+
+    // 创建动画
+    final animation = Tween<double>(
+      begin: startOffset,
+      end: endOffset,
+    ).animate(CurvedAnimation(
+      parent: _verticalSlideController,
+      curve: Curves.easeOut,
+    ));
+
+    // 监听动画更新
+    void listener() {
+      setState(() {
+        _verticalDragOffset = animation.value;
+      });
     }
 
-    setState(() {
-      _verticalDragOffset = 0;
+    animation.addListener(listener);
+
+    _verticalSlideController.forward().then((_) {
+      animation.removeListener(listener);
+      if (!mounted) return;
+      if (isUp) {
+        _onSwipeUp();
+      } else {
+        _onSwipeDown();
+      }
+      _verticalSlideController.reset();
+      setState(() {
+        _verticalDragOffset = 0;
+      });
     });
   }
 
@@ -737,14 +958,51 @@ class ImageFlowScreenState extends State<ImageFlowScreen>
 
     return Container(
       color: Colors.black,
-      child: Center(
-        child: Image.file(
-          file,
-          fit: BoxFit.contain,
-          cacheWidth: 1080,
-        ),
+      child: Stack(
+        children: [
+          Center(
+            child: Image.file(
+              file,
+              fit: BoxFit.contain,
+              cacheWidth: 1080,
+            ),
+          ),
+          // 视频标识
+          if (photo.isVideo)
+            Positioned(
+              bottom: 100,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.7),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.play_circle_outline, color: Colors.white, size: 24),
+                      const SizedBox(width: 8),
+                      Text(
+                        _formatDuration(photo.duration),
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
+  }
+
+  String _formatDuration(int seconds) {
+    final minutes = seconds ~/ 60;
+    final remainingSeconds = seconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
   }
 
   Widget _buildTopBar() {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'favorites_screen.dart';
 import 'image_flow_screen.dart';
 import 'stats_screen.dart';
@@ -20,36 +21,51 @@ class _MainScreenState extends State<MainScreen> {
   // ImageFlowScreen 的 Global Key，用于调用删除确认
   final GlobalKey<ImageFlowScreenState> _imageFlowKey = GlobalKey();
 
+  // StatsScreen 的 Global Key，用于刷新数据
+  final GlobalKey<StatsScreenState> _statsKey = GlobalKey();
+
   void _onTabChanged(int index) {
     // 切换到收藏页面时刷新数据
     if (index == 0 && _favoritesKey.currentState != null) {
       _favoritesKey.currentState!.refresh();
     }
+    // 切换到统计页面时刷新数据
+    if (index == 2 && _statsKey.currentState != null) {
+      _statsKey.currentState!.refresh();
+    }
     setState(() => _currentIndex = index);
   }
 
-  Future<bool> _onWillPop() async {
+  Future<void> _onPopInvokedWithResult(bool didPop, dynamic result) async {
+    if (didPop) return;
     // 如果在整理页面且有待删除照片，显示确认弹窗
     if (_currentIndex == 1 && _imageFlowKey.currentState != null) {
       final hasPendingDelete = _imageFlowKey.currentState!.hasPendingDelete;
       if (hasPendingDelete) {
-        return await _imageFlowKey.currentState!.showDeleteConfirmation();
+        final confirmed = await _imageFlowKey.currentState!.showDeleteConfirmation();
+        // 确认完成后留在整理页，不 pop 根路由
+        return;
       }
     }
-    return true;
+    // 没有待删除照片时，使用平台退出
+    if (mounted) {
+      // 使用 SystemNavigator.pop() 退出应用
+      await SystemNavigator.pop();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: _onWillPop,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: _onPopInvokedWithResult,
       child: Scaffold(
         body: IndexedStack(
           index: _currentIndex,
           children: [
             FavoritesScreen(key: _favoritesKey),
             ImageFlowScreen(key: _imageFlowKey),
-            const StatsScreen(),
+            StatsScreen(key: _statsKey),
             const SettingsScreen(),
           ],
         ),
